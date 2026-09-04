@@ -1,27 +1,33 @@
 import streamlit as st
 import numpy as np
-import google.generativeai as genai
+from openai import OpenAI
+import json
 import os
 
-# Configuração da página do Streamlit
 st.set_page_config(page_title="Simulador e Agente - Apostas", page_icon="📊")
 st.title("Agente Educacional: Análise de Risco em Apostas")
 
-# Configuração do Gemini (Requer que a GEMINI_API_KEY esteja nos Secrets do Streamlit)
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 except KeyError:
-    st.error("Chave de API não encontrada. Configure os Secrets do Streamlit.")
+    st.error("Chave de API não encontrada. Configure os Secrets do Streamlit em .streamlit/secrets.toml ou na Cloud.")
     st.stop()
 
-# 1. Definição do Motor Matemático
-def simular_monte_carlo(odd: float, aposta: float, repeticoes: int, banca_inicial: float) -> dict:
+# 1. Base de Conhecimento Estática (Substituindo os PDFs para simplificar a arquitetura)
+def carregar_base_teorica():
+    # Em produção, você pode usar open('texto.txt').read() aqui
+    return """
+    Referencial Teórico:
+    - Aversão à perda: A dor de perder é psicologicamente mais intensa que o prazer de ganhar.
+    - Falácia do jogador: A crença irracional de que eventos passados afetam eventos independentes futuros.
+    - Expectativa matemática nas apostas esportivas sempre favorece a plataforma devido à margem da casa (house edge).
     """
-    Simula trajetórias de retornos financeiros esperados para apostas de quota fixa.
-    Obrigatório acionar esta ferramenta quando o usuário perguntar sobre projeções, lucros ou riscos financeiros.
-    """
+
+# 2. Definição do Motor Matemático
+def simular_monte_carlo(odd: float, aposta: float, repeticoes: int, banca_inicial: float) -> str:
+    """Função Python pura. Retorna JSON stringificado para o LLM."""
     if odd <= 1.0:
-        return {"erro": "A odd (cotação) deve ser estritamente maior que 1.0"}
+        return json.dumps({"erro": "A odd (cotação) deve ser estritamente maior que 1.0"})
     
     p = 1.0 / odd
     lucro_liquido = aposta * (odd - 1.0)
@@ -34,107 +40,108 @@ def simular_monte_carlo(odd: float, aposta: float, repeticoes: int, banca_inicia
     bancas_finais = banca_inicial + (vitorias * lucro_liquido) - (derrotas * aposta)
     prob_ruina = np.sum(bancas_finais <= 0) / n_sims
     
-    return {
+    return json.dumps({
         "valor_esperado_por_aposta": round(ev, 2),
         "probabilidade_de_ruina_percentual": round(float(prob_ruina) * 100, 2),
         "banca_media_esperada": round(float(np.mean(bancas_finais)), 2)
-    }
-
-# 2. Configuração do System Prompt e Base de Conhecimento
-instrucao_sistema = """
-Você é um assistente educacional sobre o mercado de apostas esportivas (bets) no Brasil.
-Seu objetivo é explicar conceitos de economia comportamental (aversão à perda, falácia do jogador, desconto hiperbólico) e estatística.
-Regras estritas:
-1. Nunca recomende apostas ou forneça estratégias para ganhar.
-2. Para qualquer pergunta envolvendo projeções, retornos ou risco financeiro ao longo do tempo, você DEVE usar a ferramenta simular_monte_carlo.
-3. Explique os resultados da simulação de forma clara, conectando o valor esperado negativo com a vantagem da casa (house edge).
-"""
-
-# Inicializa o modelo apenas uma vez
-@st.cache_resource
-def carregar_modelo():
-    return genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        tools=[simular_monte_carlo],
-        system_instruction=instrucao_sistema
-    )
-
-modelo = carregar_modelo()
-
-import os
-
-# [...] (Mantenha os imports, a função simular_monte_carlo e a instrucao_sistema iguais)
-
-@st.cache_resource
-def inicializar_agente_com_documentos():
-    """
-    Executa o upload dos PDFs apenas uma vez na inicialização do servidor
-    e injeta os objetos de arquivo no histórico inicial do chat.
-    """
-    arquivos_gemini = []
-    diretorio_conhecimento = "conhecimento"
-    
-    # 1. Faz o upload da base bibliográfica (Kahneman, relatórios SPA, etc.)
-    if os.path.exists(diretorio_conhecimento):
-        for arquivo in os.listdir(diretorio_conhecimento):
-            if arquivo.endswith(".pdf"):
-                caminho = os.path.join(diretorio_conhecimento, arquivo)
-                doc = genai.upload_file(path=caminho)
-                arquivos_gemini.append(doc)
-    
-    # 2. Declara a LLM com a ferramenta de simulação acoplada
-    modelo = genai.GenerativeModel(
-        model_name='gemini-1.5-flash',
-        tools=[simular_monte_carlo],
-        system_instruction=instrucao_sistema
-    )
-    
-    # 3. Inicializa o histórico. A primeira mensagem oculta carrega os tensores dos PDFs.
-    historico_inicial = []
-    if arquivos_gemini:
-        historico_inicial.append({
-            "role": "user",
-            "parts": arquivos_gemini
-        })
-        # Força uma mensagem de confirmação do modelo para estabilizar o histórico
-        historico_inicial.append({
-            "role": "model",
-            "parts": ["Documentos carregados. Usarei esta base para análises comportamentais."]
-        })
-
-    chat = modelo.start_chat(
-        history=historico_inicial,
-        enable_automatic_function_calling=True
-    )
-    return chat
-
-# 3. Gerenciamento de Estado da Sessão (Histórico do Chat)
-if "chat_session" not in st.session_state:
-    st.session_state.chat_session = inicializar_agente_com_documentos()
-
-if "mensagens" not in st.session_state:
-    st.session_state.mensagens = []
-    st.session_state.mensagens.append({
-        "role": "assistant", 
-        "content": "Olá. Sou o assistente de avaliação de risco estatístico. Como posso ajudar na sua análise hoje?"
     })
 
-# [...] (Mantenha a Renderização da Interface e o Processamento do Input idênticos)
+# 3. Mapeamento da Ferramenta (Schema OpenAI)
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "simular_monte_carlo",
+            "description": "Simula trajetórias de retornos financeiros e calcula o risco de falência para apostas.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "odd": {"type": "number", "description": "A odd decimal da aposta (ex: 1.5)"},
+                    "aposta": {"type": "number", "description": "Valor financeiro apostado por rodada"},
+                    "repeticoes": {"type": "integer", "description": "Número de vezes que a aposta será repetida"},
+                    "banca_inicial": {"type": "number", "description": "Saldo financeiro inicial do usuário"}
+                },
+                "required": ["odd", "aposta", "repeticoes", "banca_inicial"]
+            }
+        }
+    }
+]
 
+# 4. Gerenciamento de Estado da Sessão
+instrucao_sistema = f"""
+Você é um assistente educacional sobre o mercado de apostas esportivas no Brasil.
+Baseie-se neste conteúdo para responder: {carregar_base_teorica()}
+Regras estritas:
+1. Nunca recomende apostas.
+2. Para perguntas envolvendo projeções, risco ou simulações financeiras ao longo do tempo, VOCÊ DEVE obrigatoriamente usar a ferramenta simular_monte_carlo.
+3. Explique os resultados da simulação citando heurísticas comportamentais.
+"""
 
-# 5. Processamento do Input do Usuário
+if "mensagens" not in st.session_state:
+    st.session_state.mensagens = [
+        {"role": "system", "content": instrucao_sistema},
+        {"role": "assistant", "content": "Olá. Sou o assistente de avaliação de risco estatístico. Como posso ajudar na sua análise?"}
+    ]
+
+# Renderização da Interface (Ignorando mensagens de sistema e chamadas de ferramenta brutas)
+for msg in st.session_state.mensagens:
+    if msg["role"] not in ["system", "tool"] and not msg.get("tool_calls"):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+# 5. Loop de Processamento e Roteamento
 if prompt := st.chat_input("Digite sua dúvida ou os parâmetros da aposta..."):
-    # Exibe a mensagem do usuário
     st.session_state.mensagens.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     
-    # Aciona o modelo e exibe a resposta
     with st.chat_message("assistant"):
-        with st.spinner("Processando simulação estocástica e análise estrutural..."):
-            try:
-                resposta = st.session_state.chat_session.send_message(prompt)
-                st.markdown(resposta.text)
-                st.session_state.mensagens.append({"role": "assistant", "content": resposta.text})
-            except Exception as e:
-                st.error(f"Erro na execução da matriz de processamento: {e}")
+        with st.spinner("Processando simulação e analisando contexto..."):
+            # Primeira chamada ao LLM
+            resposta_inicial = client.chat.completions.create(
+                model="gpt-4o-mini", # Modelo com excelente custo-benefício para agentes
+                messages=st.session_state.mensagens,
+                tools=tools,
+                tool_choice="auto"
+            )
+            
+            mensagem_retorno = resposta_inicial.choices[0].message
+            
+            # Condicional de roteamento: O LLM decidiu usar o simulador?
+            if mensagem_retorno.tool_calls:
+                # O histórico exige que a intenção de chamada da ferramenta seja anexada
+                st.session_state.mensagens.append(mensagem_retorno)
+                
+                for tool_call in mensagem_retorno.tool_calls:
+                    if tool_call.function.name == "simular_monte_carlo":
+                        # Extrai os parâmetros inferidos pelo LLM
+                        args = json.loads(tool_call.function.arguments)
+                        resultado_str = simular_monte_carlo(
+                            odd=args.get("odd"),
+                            aposta=args.get("aposta"),
+                            repeticoes=args.get("repeticoes"),
+                            banca_inicial=args.get("banca_inicial")
+                        )
+                        
+                        # Anexa o resultado determinístico no histórico como papel "tool"
+                        st.session_state.mensagens.append({
+                            "tool_call_id": tool_call.id,
+                            "role": "tool",
+                            "name": "simular_monte_carlo",
+                            "content": resultado_str
+                        })
+                
+                # Segunda chamada ao LLM para sintetizar os números do simulador
+                resposta_sintese = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=st.session_state.mensagens
+                )
+                
+                texto_final = resposta_sintese.choices[0].message.content
+                st.markdown(texto_final)
+                st.session_state.mensagens.append({"role": "assistant", "content": texto_final})
+            
+            else:
+                # O LLM decidiu responder direto (ex: dúvida estritamente teórica)
+                st.markdown(mensagem_retorno.content)
+                st.session_state.mensagens.append({"role": "assistant", "content": mensagem_retorno.content})
